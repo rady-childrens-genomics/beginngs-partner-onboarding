@@ -15,8 +15,7 @@
 
 ### Genotype Classification
 
-### Diplotype Matrix
+## 1000 Genomes Validation Test Output
 
-### Diplotype Concatenated String Report
-
-### 1000 Genomes Validation Test Output
+- [benchmarks/onekg_diplotypes.csv](benchmarks/onekg_diplotypes.csv)
+- [benchmarks/onekg_genotypes.csv](benchmarks/onekg_genotypes.csv)
