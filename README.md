@@ -11,6 +11,7 @@
 ## Implementation for non-TileDB Users
 <img width="6930" alt="beginngs_flow" src="https://github.com/user-attachments/assets/499cce9a-e42c-4236-9b45-b140edd45e1e">
 
+
 ## Output
 
 ### Genotype Classification
