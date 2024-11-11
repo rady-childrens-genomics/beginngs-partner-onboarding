@@ -21,5 +21,7 @@
 
 ## 1000 Genomes Validation Test Output
 
+The following genotype and diplotype output was obtained by running the query on 3202 high-coverage DRAGEN 1000 Genomes samples. This can be used to validate external implementations.
+
 - [benchmarks/onekg_diplotypes.csv](benchmarks/onekg_diplotypes.csv)
 - [benchmarks/onekg_genotypes.csv](benchmarks/onekg_genotypes.csv)
