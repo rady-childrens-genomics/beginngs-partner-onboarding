@@ -9,7 +9,7 @@
 <img width="1589" alt="federated" src="https://github.com/user-attachments/assets/88c87f9f-b0a3-4754-8932-d6733adb5490">
 
 ## Implementation for non-TileDB Users
-<img width="6930" alt="beginngs_flow" src="https://github.com/user-attachments/assets/499cce9a-e42c-4236-9b45-b140edd45e1e">
+<img width="6930" alt="beginngs_flow" src="beginngs_flow.png">
 
 
 ## Output
