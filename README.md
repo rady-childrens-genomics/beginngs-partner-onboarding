@@ -14,6 +14,8 @@
 
 ### Source Code
 
+Python source code for the BeginNGS query (both require a TileDB variant store)
+
 [src/genotype_count_dispatch.py](src/genotype_count_dispatch.py) contains the mechanics of the BeginNGS query used in the federated implementation
 
 [src/nbs_query_tiledb_repo.ipynb](src/nbs_query_tiledb_repo.ipynb) contains a more readable notebook-based implementation the BeginNGS query
