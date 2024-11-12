@@ -8,7 +8,7 @@ BeginNGS has quite a few activities. This GitHub repository relates to one of th
 
 The narrow rationale for BeginNGS query federation is to overcome a major impediment to genome-based newborn screening (gNBS) - namely imprecision due to variants classified as pathogenic (P) or likely pathogenic (LP) that are not SCGD causal. Federated training predicated on purifying hyperselection provides a general framework to attain high precision in population screening. Federated training across many biobanks and clinical trials can provide a privacy-preserving mechanism for qualification of gNBS in diverse genetic ancestries.
 
-The broader goal is to refine understanding of the genetic basis of the natural history of each SCGD in each genetic ancestry including prevalence, penetrance, expressivity, locus heterogeneity, variant (diplotype) heterogeneity, and untreated and treated outcomes across the lifespan.
+The broader goal is to refine understanding of the genetic basis of the natural history of each SCGD in each genetic ancestry including prevalence, penetrance, expressivity, locus heterogeneity, variant (diplotype) heterogeneity, and untreated and treated outcomes across the lifespan. Examples of such analyses of the UK Biobank cohort are described in Kingsmore et al. Am J Hum Genet. In Press.
 
 # Input Overview
 
