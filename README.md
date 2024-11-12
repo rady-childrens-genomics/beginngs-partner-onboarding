@@ -33,7 +33,7 @@ Python source code for the BeginNGS query (both require a TileDB variant store)
 
 ## 1000 Genomes Validation Test Output
 
-The following genotype and diplotype output was obtained by running the query on 3202 high-coverage DRAGEN 1000 Genomes samples. This can be used to validate external implementations.
+The following genotype and diplotype output was obtained by running the query on 3,202 high-coverage (Illumina 30X) DRAGEN 1000 Genomes Project samples (PMID:36055201, DOI: 10.1016/j.cell.2022.08.004) aligned to GRCh38 with Illumina DRAGEN v.4.2 (PMID: 39455800 DOI: 10.1038/s41587-024-02382-1. This can be used to validate external implementations.
 
 - [benchmarks/onekg_diplotypes.csv](benchmarks/onekg_diplotypes.csv)
 - [benchmarks/onekg_genotypes.csv](benchmarks/onekg_genotypes.csv)
