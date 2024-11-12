@@ -12,7 +12,7 @@ The broader goal is to refine understanding of the genetic basis of the natural 
 
 # Input Overview
 
-- Variants of interest (currently 53,855 P and LP variants that map to 342 genes, 412 SCGD, and 1,603 SCGD therapeutic interventions) is normally encapsulated as a fixed resource inthe UDF, but can be implemented as an parameter. This is pre-annotated with consequence and population frequency information, but only chr-pos-ref-alt is used for the query itself. 
+- Variants of interest (currently BeginNGS v2, 53,855 P and LP variants that map to 342 genes, 412 SCGD, and 1,603 SCGD therapeutic interventions) is normally encapsulated as a fixed resource inthe UDF, but can be implemented as an parameter. This is pre-annotated with consequence and population frequency information, but only chr-pos-ref-alt is used for the query itself. 
 
 ## Federated Query
 
