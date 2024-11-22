@@ -12,14 +12,14 @@ The broader goal is to refine understanding of the genetic basis of the natural 
 
 # Input Overview
 
-- Variants of interest (currently BeginNGS v2, 53,855 P and LP variants that map to 342 genes, 412 SCGD, and 1,603 SCGD therapeutic interventions) is normally encapsulated as a fixed resource inthe UDF, but can be implemented as an parameter. This is pre-annotated with consequence and population frequency information, but only chr-pos-ref-alt is used for the query itself. 
+- Variants of interest (currently BeginNGS v2, 53,855 P and LP variants that map to 342 genes, 412 SCGD, and 1,603 SCGD therapeutic interventions) is normally encapsulated as a fixed resource inthe UDF, but can be implemented as an parameter. This is pre-annotated with consequence and population frequency information, but only chr-pos-ref-alt is used for the query itself.
 
 ## Federated Query
 
 <img width="1589" alt="federated" src="https://github.com/user-attachments/assets/88c87f9f-b0a3-4754-8932-d6733adb5490">
 
-
 ## Implementation for non-TileDB Users
+
 <img width="6930" alt="beginngs_flow" src="beginngs_flow.png">
 
 ### Source Code
@@ -30,10 +30,12 @@ Python source code for the BeginNGS query (both require a TileDB variant store)
 
 [src/nbs_query_tiledb_repo.ipynb](src/nbs_query_tiledb_repo.ipynb) contains a more readable notebook-based implementation the BeginNGS query
 
-
 ## 1000 Genomes Validation Test Output
 
-The following genotype and diplotype output was obtained by running the query on 3,202 high-coverage (Illumina 30X) DRAGEN 1000 Genomes Project samples (PMID:36055201, DOI: 10.1016/j.cell.2022.08.004) aligned to GRCh38 with Illumina DRAGEN v.4.2 (PMID: 39455800 DOI: 10.1038/s41587-024-02382-1. This can be used to validate external implementations.
+The following genotype and diplotype output was obtained by running the query on 3,202 high-coverage (Illumina 30X) DRAGEN 1000 Genomes Project samples (PMID:36055201, DOI: 10.1016/j.cell.2022.08.004) aligned to GRCh38 with Illumina DRAGEN v.4.2.7 (PMID: 39455800 DOI: 10.1038/s41587-024-02382-1. This can be used to validate external implementations.
+
+The relevant 4.2.7 DRAGEN 1000 Genomes VCFs can be found in this Amazon S3 bucket:
+`aws s3 ls --no-sign-request s3://1000genomes-dragen-v4-2-7/data/individuals/hg38_alt_masked_graph_v3/`
 
 - [benchmarks/onekg_diplotypes.csv](benchmarks/onekg_diplotypes.csv)
 - [benchmarks/onekg_genotypes.csv](benchmarks/onekg_genotypes.csv)
