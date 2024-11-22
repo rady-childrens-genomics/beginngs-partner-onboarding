@@ -39,8 +39,8 @@ The relevant 4.2.7 DRAGEN 1000 Genomes VCFs can be found in this Amazon S3 bucke
 
 Query on 1kg with no blocklist
 
-- [benchmarks/onekg_diplotypes.csv](benchmarks/onekg_noblocklist_diplotypes.csv)
-- [benchmarks/onekg_genotypes.csv](benchmarks/onekg_noblocklist_diplotypes.csv)
+- [benchmarks/onekg_noblocklist_diplotypes.csv](benchmarks/onekg_noblocklist_diplotypes.csv)
+- [benchmarks/onekg_noblocklist_genotypes.csv](benchmarks/onekg_noblocklist_genotypes.csv)
 
 Query on 1kg with blocklist applied
 

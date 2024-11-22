@@ -775,7 +775,6 @@ def beginngs_query(
     batch_mode: bool = False,
     max_sample_batch_size: int = 2000,
     threads: int = 4,
-    aggregate_variants=True,
     verbose: bool = False,
     population_source: str = "rady",
     metadata_attrs: dict = None,
@@ -800,7 +799,6 @@ def beginngs_query(
         batch_mode: Whether to process samples in batches (default: False)
         max_sample_batch_size: Maximum samples per batch when batch_mode=True (default: 2000)
         threads: Number of threads to use for processing (default: 4)
-        aggregate_variants: Whether to aggregate variant counts (default: True)
         verbose: Enable verbose logging (default: False)
         population_source: Source population for metadata lookup (default: "rady")
 
@@ -1055,9 +1053,9 @@ def beginngs_query(
     vcf_df = vcf_df.drop_duplicates(subset=['sample_name', 'contig', 'pos_start', 'ref', 'alt'])
     vcf_df['chrposrefalt'] = vcf_df.apply(lambda row: f"{row['contig']}:{row['pos_start']}:{row['ref']}>{row['alt']}", axis=1)
 
-    if aggregate_variants:
-        pivot_df_counts = aggregate_variants_data(vcf_df)
-        vcf_df = get_zygosity_counts(vcf_df)
+    # aggregate variants
+    pivot_df_counts = aggregate_variants_data(vcf_df)
+    vcf_df = get_zygosity_counts(vcf_df)
 
 
 
@@ -1089,7 +1087,6 @@ def test_beginngs():
         max_sample_batch_size=2000,
         threads=4,
         namespace=None,
-        aggregate_variants=True,
         remove_sample_name_suffix=True,
         verbose=False,
         population_source="rady"
