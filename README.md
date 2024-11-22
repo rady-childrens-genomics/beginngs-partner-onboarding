@@ -37,5 +37,12 @@ The following genotype and diplotype output was obtained by running the query on
 The relevant 4.2.7 DRAGEN 1000 Genomes VCFs can be found in this Amazon S3 bucket:
 `aws s3 ls --no-sign-request s3://1000genomes-dragen-v4-2-7/data/individuals/hg38_alt_masked_graph_v3/`
 
+Query on 1kg with no blocklist
+
+- [benchmarks/onekg_diplotypes.csv](benchmarks/onekg_noblocklist_diplotypes.csv)
+- [benchmarks/onekg_genotypes.csv](benchmarks/onekg_noblocklist_diplotypes.csv)
+
+Query on 1kg with blocklist applied
+
 - [benchmarks/onekg_diplotypes.csv](benchmarks/onekg_diplotypes.csv)
 - [benchmarks/onekg_genotypes.csv](benchmarks/onekg_genotypes.csv)
