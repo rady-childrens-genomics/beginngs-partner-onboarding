@@ -25,10 +25,20 @@ from tiledb.cloud.utilities import run_dag
 
 def zygosity(gt: np.ndarray) -> str:
     """
-    Convert genotype to a zygosity string.
+    Convert a genotype array to a zygosity string classification.
 
-    :param gt: genotype
-    :return: zygosity string
+    The zygosity is determined based on the number and values of alleles:
+    - MISSING: Empty genotype or all alleles are -1 (missing)
+    - HEMI: Single non-reference allele (hemizygous, typically X/Y chromosomes)
+    - HOM_REF: All alleles are reference (0)
+    - HOM_ALT: Multiple identical alternate alleles
+    - HET: Mix of reference and alternate alleles (heterozygous)
+
+    :param gt: Numpy array containing genotype allele indices where:
+              0 = reference allele
+              1+ = alternate allele
+              -1 = missing allele
+    :return: String indicating the zygosity classification
     """
     gt = list(gt)
 
@@ -52,12 +62,23 @@ def zygosity(gt: np.ndarray) -> str:
 
 def allele_string(ref: str, alt: str, gt: np.ndarray) -> str:
     """
-    Convert genotype to a allele_string string.
+    Convert a genotype array to a string representation of the allele combination.
 
-    :param ref: reference allele
-    :param alt: alternate allele
-    :param gt: genotype
-    :return: allele_string string
+    Creates a slash-delimited string showing the actual alleles present based on
+    the reference allele, alternate allele, and genotype array. For example:
+    - A/A for homozygous reference
+    - A/T for heterozygous
+    - T/T for homozygous alternate
+    
+    Only handles diploid (2 alleles) or haploid (1 allele) cases. For ploidy > 2,
+    returns "NA".
+
+    :param ref: Reference allele string (e.g. "A")
+    :param alt: Alternate allele string (e.g. "T") 
+    :param gt: Numpy array containing genotype allele indices where:
+              0 = reference allele
+              1 = alternate allele
+    :return: String representation of the allele combination
     """
 
     def allele(i):
@@ -94,6 +115,28 @@ def transform_vcf(
     verbose: bool = False,
     drop_samples: bool = False,
 ) -> pd.DataFrame:
+    """
+    Transform a VCF DataFrame by performing common preprocessing operations.
+
+    This function applies several transformations to VCF data:
+    1. Optionally drops duplicate variants
+    2. Splits alleles into reference and alternate columns
+    3. Handles multiallelic variants (split or join)
+    4. Filters for specific variant loci if provided
+    5. Adds zygosity classification
+    6. Adds allele string representation
+    7. Optionally drops sample information
+
+    :param vcf_df: Input DataFrame containing VCF data
+    :param split_multiallelic: If True, splits multiallelic variants into separate rows
+    :param add_zygosity: If True, adds zygosity classification column
+    :param add_allele_string: If True, adds allele string representation column
+    :param drop_duplicates: If True, removes duplicate variant entries
+    :param variant_loci: Optional list of specific variants to keep in "chrom-pos-ref-alt" format
+    :param verbose: If True, enables debug logging
+    :param drop_samples: If True, removes sample name column
+    :return: Transformed DataFrame
+    """
 
     level = logging.DEBUG if verbose else logging.INFO
     logger = get_logger(level)
@@ -183,8 +226,16 @@ def transform_vcf(
     vcf_df.drop("fmt_GT", axis=1, inplace=True)
     return vcf_df
 
-
 def aggregate_tables(tables: pa.Table) -> pa.Table:
+    """Aggregates multiple PyArrow tables into a single table with counts.
+
+    Args:
+        tables: List of PyArrow tables to aggregate
+
+    Returns:
+        A PyArrow table containing the aggregated data with counts.
+        Returns an empty table if no variants were found.
+    """
     # Return if no variants were found
     tables = [x for x in tables if x is not None and x.num_rows > 0]
     if len(tables) == 0:
@@ -210,6 +261,15 @@ def aggregate_tables(tables: pa.Table) -> pa.Table:
 
 
 def read_samples(vcf_uri: str, tiledb_cfg: Optional[dict] = None) -> List[str]:
+    """Reads sample IDs from a TileDB-VCF dataset.
+
+    Args:
+        vcf_uri: URI of the TileDB-VCF dataset
+        tiledb_cfg: Optional TileDB config dictionary
+
+    Returns:
+        List of sample IDs as strings
+    """
     def fetch_samples(vcf_uri, tiledb_cfg):
         import pyarrow as pa
         import tiledbvcf
@@ -238,8 +298,29 @@ def genotype_query_by_variants(
     num_region_partitions: int = 1,
     threads: int = 2,
     tiledb_cfg: Optional[dict] = None,
+    batch_mode: bool = False,
 
 ) -> pa.Table:
+    """Queries genotypes for specific variants from a TileDB-VCF dataset.
+
+    Args:
+        vcf_uri: URI of the TileDB-VCF dataset
+        variants: List of variant strings in format "chrom-pos-ref-alt"
+        allele_string_mode: Whether to include allele strings in output
+        zygosity_mode: Whether to include zygosity in output
+        max_sample_batch_size: Maximum number of samples per batch
+        use_large_node: Whether to use a large compute node
+        verbose: Whether to output verbose logs
+        drop_samples: Whether to drop sample IDs from output
+        drop_duplicates: Whether to drop duplicate sample/variant combinations
+        num_region_partitions: Number of region partitions for parallel processing
+        threads: max_workers
+        tiledb_cfg: cfg dict (mostly for x-payer)
+        batch_mode: Whether to use batch task graphs instead of realtime
+
+    Returns:
+        PyArrow table containing the query results
+    """
     import tiledb.cloud.vcf
 
     # Create a list of regions for each chromosome
@@ -265,11 +346,14 @@ def genotype_query_by_variants(
         max_workers = math.ceil(len(samples) / max_sample_batch_size)
 
         # Submit the distributed query
-        table = tiledb.cloud.vcf.read(
-            vcf_uri,
-            regions=regions,
-            samples=samples,
-            transform_result=transform_vcf(
+        # Check if batch_mode is a valid parameter for tiledb.cloud.vcf.read
+        import inspect
+        read_params = inspect.signature(tiledb.cloud.vcf.read).parameters
+        read_args = {
+            "dataset_uri": vcf_uri,
+            "regions": regions,
+            "samples": samples,
+            "transform_result": transform_vcf(
                 split_multiallelic=True,
                 add_zygosity=zygosity_mode,
                 add_allele_string=allele_string_mode,
@@ -277,13 +361,19 @@ def genotype_query_by_variants(
                 verbose=verbose,
                 drop_samples=drop_samples,
             ),
-            max_sample_batch_size=max_sample_batch_size,
-            max_workers=max_workers,
-            num_region_partitions=num_region_partitions,
-            resource_class="large" if use_large_node else None,
-            verbose=verbose,
-            config=tiledb_cfg,
-        )
+            "max_sample_batch_size": max_sample_batch_size,
+            "max_workers": max_workers,
+            "num_region_partitions": num_region_partitions,
+            "resource_class": "large" if use_large_node else None,
+            "verbose": verbose,
+            "config": tiledb_cfg,
+        }
+        
+        # Check if batch_mode is a valid parameter for tiledb.cloud.vcf.read
+        if "batch_mode" in read_params:
+            read_args["batch_mode"] = batch_mode
+            
+        table = tiledb.cloud.vcf.read(**read_args)
 
         return table
 
@@ -537,7 +627,7 @@ def gc_gene(
 
 
 def fetch_approved_sample_metadata(
-    sample_metadata_uri, sample_use_uri=None, tiledb_cfg=None, population_source: str = "rady"
+    sample_metadata_uri, sample_use_uri=None, tiledb_cfg=None, population_source: str = "rady", metadata_attrs: dict = None
 ):
     """
     Fetch sample metadata with proper sample use
@@ -550,6 +640,7 @@ def fetch_approved_sample_metadata(
         family_roles: list,
         genome_id_list: pa.lib.StringArray,
         population_source: str = "rady",
+        metadata_attrs: dict = None,
     ) -> pa.Table:
         """
         This function queries the metadata to lookup sample names from genome ids
@@ -558,47 +649,11 @@ def fetch_approved_sample_metadata(
         Returns:
             Sample data subset
         """
-        metadata_attrs = {}
-        metadata_attrs['rady'] = [
-            "site_id",
-            "study_id",
-            "case_id",
-            "individual_id",
-            "biospecimen",
-            "aliquot_id",
-            "test_type",
-            "family_relationship",
-            "version",
-            "sample_name",
-            "gender",
-            "fabric_report_id",
-        ]
-        metadata_attrs['ukbb-alexion'] = [
-            "sample_name",
-            "sex_encoded",
-            "genetic_sex_encoded"
-        ]
-        metadata_attrs['onekg'] = [
-            "case_id",
-            "sample_name",
-            "pid",
-            "mid",
-            "sex",
-            "sexf",
-            "pop",
-            "reg",
-            "population",
-            "region",
-            "phase3",
-            "trio",
-            "family_relationship",
-            "individual_id"
-        ]
-        sample_metadata_attrs = metadata_attrs[population_source]
+        
+        sample_metadata_attrs = metadata_attrs["sample_metadata_attrs"][population_source]
         with tiledb.scope_ctx(tiledb_cfg):
             with tiledb.open(sample_metadata_uri) as A:
-                df = A.query(attrs=sample_metadata_attrs)[:]
-                df = pd.DataFrame(df)
+                df = A.query(attrs=sample_metadata_attrs).df[:]
                 if sample_stems is not None and len(sample_stems) > 0:
                     df = df[df.sample_name.str.contains("|".join(sample_stems))]
                 if family_roles is not None and len(family_roles) > 0:
@@ -623,6 +678,7 @@ def fetch_approved_sample_metadata(
         population_source=population_source,
         name=f"FEDERATED QUERY: Sample Metadata Filter",
         resource_class="standard",
+        metadata_attrs=metadata_attrs,
     )
     sample_graph.compute()
     sample_graph.wait()
@@ -716,96 +772,109 @@ def beginngs_query(
     sample_use_uri: str,
     use_blocklist: bool = True,
     tiledb_cfg=None,
-    namespace=None,
+    batch_mode: bool = False,
+    max_sample_batch_size: int = 2000,
+    threads: int = 4,
     aggregate_variants=True,
-    remove_sample_name_suffix=True,
     verbose: bool = False,
     population_source: str = "rady",
+    metadata_attrs: dict = None,
 ):
     """
-    This reads in an Alexion-style mother-of-all-annotated variants table (moaavt), queries variants and return them annotated
+    Query variants and genotypes from a mother-of-all-annotated variants table (MOAAVT).
+
+    This function reads a MOAAVT containing annotated variants, queries the variants and their genotypes,
+    and returns aggregated genotype and diplotype counts. It can optionally filter variants using a
+    blocklist and/or BED regions.
+
+    Args:
+        vcf_uri: URI of the VCF array
+        moaavt_uri: URI of the MOAAVT array containing annotated variants
+        moi_uri: URI of the mode of inheritance array
+        blocklist_uri: URI of the variant blocklist array
+        bed_lines: Optional list of BED regions to restrict variant queries
+        sample_metadata_uri: URI of the sample metadata array
+        sample_use_uri: URI of the sample usage permissions array
+        use_blocklist: Whether to filter variants using the blocklist (default: True)
+        tiledb_cfg: Optional TileDB config dictionary
+        batch_mode: Whether to process samples in batches (default: False)
+        max_sample_batch_size: Maximum samples per batch when batch_mode=True (default: 2000)
+        threads: Number of threads to use for processing (default: 4)
+        aggregate_variants: Whether to aggregate variant counts (default: True)
+        verbose: Enable verbose logging (default: False)
+        population_source: Source population for metadata lookup (default: "rady")
+
+    Returns:
+        BeginNGSResult containing genotype and diplotype counts as pyarrow Tables
     """
     log = get_logger()
     log.propagate = False
     import tomli
     import pathlib
 
-    if verbose:
-        log.info(f"beginngs query using vcf_uri: {vcf_uri} and moaavt:{moaavt_uri}")
-    #TODO: we need to open the mooavt with the UDF
-    with tiledb.scope_ctx(tiledb_cfg):
-        with tiledb.open(moaavt_uri, mode="r") as mu:
-            variant_df = mu.df[:]
-        # reset this index
-        # TODO: actually use an index in some intelligent manner
+    import json
+    import os
+    import pkg_resources
+    import yaml
+    import sys
+
+    if metadata_attrs is None:
+        # this won't work within the UDF context, it must be passed from the package
+        metadata_attrs_path = pkg_resources.resource_filename('vcf_federated', 'config/metadata_attrs.json')
+        with open(metadata_attrs_path) as f:
+            metadata_attrs = json.load(f)
+
+    def load_variant_data(moaavt_uri, tiledb_cfg):
+        with tiledb.scope_ctx(tiledb_cfg):
+            with tiledb.open(moaavt_uri, mode="r") as mu:
+                variant_df = mu.df[:]
         variant_df = variant_df.reset_index()
-        log.info(f"{len(variant_df)} variants found in the moaavt")
-
-
-
         variant_df = variant_df.rename(columns={"CLINVAR_VARIANT_ID": "CLINVAR_ID"})
+        return variant_df
 
-        if use_blocklist == True and blocklist_uri is not None:
-            variant_df = apply_blocklist(variant_df=variant_df, blocklist_uri=blocklist_uri,tiledb_cfg=tiledb_cfg)
-
-        if bed_lines is not None and len(bed_lines) > 0:
-            # Convert BED lines to BED regions
-            bed_regions = [
-                f"{line.split()[0]}:{line.split()[1]}-{line.split()[2]}"
-                for line in bed_lines
-            ]
-            log.info(f"there are {len(bed_regions)} bed regions")
-            variants_in_bed_region = []
-            for region in bed_regions:
-                # echo region being like chr1:0-999
-                # BED is 0-based non-inclusive.
-                # Don't touch the start, decrement the end
-                chrom, start_pos, end_pos = (
-                    region.split(":")[0],
-                    int(region.split(":")[1].split("-")[0]) + 1,
-                    int(region.split(":")[1].split("-")[1]),
-                )
-                # isolate variants from variant_df that are in the bed region
-
-                variants_in_bed_region += [
-                    variant_df[
-                        (variant_df["CHROM"] == chrom)
-                        & (variant_df["POS"] >= start_pos)
-                        & (variant_df["POS"] <= end_pos)
-                    ]
+    def filter_variants_by_bed(variant_df, bed_lines):
+        if not bed_lines:
+            log.info("no bed regions found")
+            return variant_df
+            
+        bed_regions = [
+            f"{line.split()[0]}:{line.split()[1]}-{line.split()[2]}"
+            for line in bed_lines
+        ]
+        log.info(f"there are {len(bed_regions)} bed regions")
+        
+        variants_in_bed_region = []
+        for region in bed_regions:
+            chrom, start_pos, end_pos = (
+                region.split(":")[0],
+                int(region.split(":")[1].split("-")[0]) + 1,
+                int(region.split(":")[1].split("-")[1]),
+            )
+            variants_in_bed_region += [
+                variant_df[
+                    (variant_df["CHROM"] == chrom)
+                    & (variant_df["POS"] >= start_pos)
+                    & (variant_df["POS"] <= end_pos)
                 ]
-            variant_df = pd.concat(variants_in_bed_region)
-        else:
-            log.info(f"no bed regions found")
+            ]
+        return pd.concat(variants_in_bed_region)
 
-        # TODO: let's build this out of the CHROM POS REF ALT from moaavt
+    def get_genotype_data(vcf_uri, variant_df, batch_mode, max_sample_batch_size, threads, verbose, tiledb_cfg):
         variant_loci = variant_df.apply(lambda row: f"{row['CHROM']}-{row['POS']}-{row['REF']}-{row['ALT']}", axis=1).tolist()
-        #variant_loci = list(variant_df["ID"])
-
-        log.info(
-            f"Querying genotype_query_by_variants for {len(variant_loci)} variants {variant_loci[:5]}..."
-        )
+        
+        log.info(f"Querying genotype_query_by_variants for {len(variant_loci)} variants {variant_loci[:5]}...")
         log.info(f"genotype_query_by_variants")
+        log.info(f"batch_mode: {batch_mode}")
         t_start = time.time()
 
-        #   contig  pos_start	ref	                                            alt	sample_name	zygosity	allele_string count
-        # 0	chr1	1041678	CGCTCCGGCCAGTGCCAGGGTCGAGGTGAGCGGCTCCCCCGGGGGAGG	C	sample_1	HET	    T   1
-        # 1	chr1	1041678	CGCTCCGGCCAGTGCCAGGGTCGAGGTGAGCGGCTCCCCCGGGGGAGG	C	sample_2	HET	    G/C 1
-        # 2	chr1	1041678	CGCTCCGGCCAGTGCCAGGGTCGAGGTGAGCGGCTCCCCCGGGGGAGG	C	sample_3	HET	    T   1
-        # 3	chr1	1041678	CGCTCCGGCCAGTGCCAGGGTCGAGGTGAGCGGCTCCCCCGGGGGAGG	C	sample_4	HET	    T/G 1
-        # 4	chr1	1041678	CGCTCCGGCCAGTGCCAGGGTCGAGGTGAGCGGCTCCCCCGGGGGAGG	C	sample_5	HET     T/G 1
-        # ...	...	...	...	...	...	...	...
-        # 25995	chrX	154930903	C	T	sample_10	HEMI	1
-        # 25996	chrX	154930950	G	C	sample_11	HET	1
-        # 25997	chrX	154966103	C	T	sample_12	HEMI	1
-        # 25998	chrX	154993141	T	G	sample_13	HET	1
-        # 25999	chrX	154993141	T	G	sample_14	HET	1
         table = genotype_query_by_variants(
             vcf_uri,
             variants=variant_loci,
             allele_string_mode=True,
             zygosity_mode=True,
-            max_sample_batch_size=2000,
+            batch_mode=batch_mode,
+            max_sample_batch_size=max_sample_batch_size,
+            threads=threads,
             use_large_node=False,
             verbose=verbose,
             drop_samples=False,
@@ -813,242 +882,217 @@ def beginngs_query(
             tiledb_cfg=tiledb_cfg,
         ).to_pandas()
 
-
         log.info(f"genotype_query_by_variants finished")
+        log.info(f"Done in {time.time() - t_start:.3f} seconds")
 
+        return table
 
-        if len(table) == 0:
-            log.info(f"No variants of interest found in the TileDB-VCF dataset")
-            return pa.Table.from_pandas(table)
-        # drop count, not relevant if we have preserved the sample_name
-        table = table.drop("count", axis=1)
-        # contig  pos_start ref      alt zygosity  count
-        variant_df_core = variant_df[
-            ["CHROM", "POS", "REF", "ALT", "GENE", "CLINVAR_ID"]
-        ]
-        # rename to contig, pos_start, ref, alt
-        variant_df_core = variant_df_core.rename(
-            columns={"CHROM": "contig", "POS": "pos_start", "REF": "ref", "ALT": "alt"}
-        )
-        table = table.merge(
-            variant_df_core,
-            on=["contig", "pos_start", "ref", "alt"],
-            how="inner",
-        )
-        # table = pa.Table.from_pandas(table)
-        # split table by GENE and apply compute_comopund_heterozygosity to each group
+    def process_compound_heterozygosity(table):
         genes = table["GENE"].unique()
-
         cmpd_tables = []
-        # TODO: in parallel either threaded or distributed
         for gene in genes:
             gene_table = table[table["GENE"] == gene]
             log.info(f"{len(gene_table)} variants found for gene {gene}")
             cmpd_tables.append(
                 compute_compound_heterozygosity(pa.Table.from_pandas(gene_table))
             )
+        return pa.concat_tables(cmpd_tables)
 
-        table = pa.concat_tables(cmpd_tables)
-
-        log.info(f"Done in {time.time() - t_start:.3f} seconds")
-
-        vcf_df = table.to_pandas()
+    def merge_sample_metadata(vcf_df, sample_metadata_uri, sample_use_uri, population_source, metadata_attrs):
+        if sample_metadata_uri is None:
+            return vcf_df
+            
+        filtered_metadata = fetch_approved_sample_metadata(
+            sample_metadata_uri, sample_use_uri, population_source=population_source, metadata_attrs=metadata_attrs
+        )
         
-        if sample_metadata_uri is not None:
-            filtered_metadata = fetch_approved_sample_metadata(
-                sample_metadata_uri, sample_use_uri, population_source=population_source
-            )
-            log.info(f"filtered metadata: {len(filtered_metadata)} samples form filtered_metadata")
-            # Convert sample_name to string if it's binary
-            filtered_metadata['sample_name'] = filtered_metadata['sample_name'].astype(str)
-            #remove -1 from sample_name
-            if population_source == "rady":
-                log.info("removing sample name suffix for merge")
-                vcf_df["sample_name"] = vcf_df["sample_name"].str.replace(r"-1$", "", regex=True)
-                filtered_metadata["sample_name"] = filtered_metadata["sample_name"].str.replace(r"-1$", "", regex=True)
-            sm_samples = list(filtered_metadata["sample_name"])
-            log.info(f"{len(sm_samples)} approved samples found in sample metadata")
-            log.info(f"{len(vcf_df[['sample_name','contig','pos_start','ref','alt']].drop_duplicates())} tuples before sample filter")
-            log.info(f"merging on sample_name {vcf_df['sample_name'][:5]} vs {filtered_metadata['sample_name'][:5]}")
-            vcf_df = pd.merge(
-                vcf_df, filtered_metadata, on=["sample_name"], how="inner"
-            )
-            log.info(f"{len(vcf_df[['sample_name','contig','pos_start','ref','alt']].drop_duplicates())} tuples after sample filter")
-
-
-
-        # TODO: open this using the UDF auth
-
         if population_source == "rady":
-            sex_field = "gender"
-            sex_lookup = {"Male":"Male", "Female":"Female"}
-        elif population_source == "onekg":
-            sex_field = "sexf"
-            sex_lookup = {"Male":1, "Female":2}
+            log.info("removing sample name suffix for merge")
+            vcf_df["sample_name"] = vcf_df["sample_name"].str.replace(r"-1$", "", regex=True)
+            filtered_metadata["sample_name"] = filtered_metadata["sample_name"].str.replace(r"-1$", "", regex=True)
         elif population_source == "ukbb-alexion":
-            sex_field = "sex_encoded"
-            sex_lookup = {"Male":1, "Female":2}
-        else:
-            raise ValueError(f"Unknown population source: {population_source}")
-
-        if moi_uri is not None:
-            with tiledb.open(moi_uri) as moi_fh:
-                moi_df = moi_fh.df[:]
-
-            gene_poi_map = {}
-            for gene, poi in zip(moi_df["GENE"], moi_df["MOI"]):
-                gene_poi_map[gene.upper()] = poi
-
-            vcf_df["moi"] = vcf_df["GENE"].map(gene_poi_map)
-            vcf_df["positive_genotype"] = vcf_df.apply(positive_genotype, axis=1)
-        else:
-            vcf_df["positive_genotype"] = "N/A"
+            log.info("renaming sample column to sample_name for ukbb-alexion")
+            filtered_metadata = filtered_metadata.rename(columns={"cgr_sequence_id": "sample_name"})
+            
+        filtered_metadata["sample_name"] = filtered_metadata["sample_name"].astype(str)
         
-        #actually dedup on sample_name, contig, pos_start, ref, alt
-        vcf_df = vcf_df.drop_duplicates(subset=['sample_name', 'contig', 'pos_start', 'ref', 'alt'])
-        # count distinct sample names for each contig, pos_start, ref, alt
+        sm_samples = list(filtered_metadata["sample_name"])
+        log.info(f"{len(sm_samples)} approved samples found in sample metadata")
+        log.info(f"{len(vcf_df[['sample_name','contig','pos_start','ref','alt']].drop_duplicates())} tuples before sample filter")
+        log.info(f"merging on sample_name {vcf_df['sample_name'][:5]} vs {filtered_metadata['sample_name'][:5]} (ensure strings)")
+        
+        vcf_df = pd.merge(vcf_df, filtered_metadata, on=["sample_name"], how="inner")
+        log.info(f"{len(vcf_df[['sample_name','contig','pos_start','ref','alt']].drop_duplicates())} tuples after sample filter")
+        
+        return vcf_df
 
-        vcf_df['chrposrefalt'] = vcf_df.apply(lambda row: f"{row['contig']}:{row['pos_start']}:{row['ref']}>{row['alt']}", axis=1)
+    def aggregate_variants_data(vcf_df):
+        log.info("Group by variant")
+        log.info("Set zygosity for compound_event")
+        vcf_df.loc[vcf_df['compound_event'] == 'CMPD_HET', 'zygosity'] = 'CMPD_HET'
 
+        if vcf_df.duplicated(subset=['sample_name', 'chrposrefalt']).any():
+            duplicates = vcf_df[vcf_df.duplicated(subset=['sample_name', 'chrposrefalt'], keep=False)]
+            log.info(f"Found {len(duplicates)} duplicate rows:")
+            log.info(duplicates)
+            raise ValueError("Found duplicate sample_name/variant combinations - cannot pivot. Please deduplicate first.")
 
-        if aggregate_variants:
-            log.info(f"Group by variant")
-            log.info(f"Set zygosity for compound_event")
-            # Set zygosity to CMPD_HET where compound_event is CMPD_HET
-            vcf_df.loc[vcf_df['compound_event'] == 'CMPD_HET', 'zygosity'] = 'CMPD_HET'
+        unique_genes = sorted(vcf_df['GENE'].unique())
+        log.info(f"Found {len(unique_genes)} unique genes")
 
-            # Check for duplicate index entries before pivoting
-            if vcf_df.duplicated(subset=['sample_name', 'chrposrefalt']).any():
-                duplicates = vcf_df[vcf_df.duplicated(subset=['sample_name', 'chrposrefalt'], keep=False)]
-                log.info(f"Found {len(duplicates)} duplicate rows:")
-                log.info(duplicates)
-                raise ValueError("Found duplicate sample_name/variant combinations - cannot pivot. Please deduplicate first.")
+        all_gene_pivot_counts = []
+        for gene in unique_genes:
+            gene_df = vcf_df[vcf_df['GENE'] == gene]
+            log.info(f"Processing gene {gene} with {len(gene_df)} variants")
             
-            # Get unique genes
-            unique_genes = sorted(vcf_df['GENE'].unique())
-            log.info(f"Found {len(unique_genes)} unique genes")
-
-            # Create empty list to store gene-specific pivot tables
-            all_gene_pivot_counts = []
-            # Iterate over each gene
-            for gene in unique_genes:
-                gene_df = vcf_df[vcf_df['GENE'] == gene]
-                log.info(f"Processing gene {gene} with {len(gene_df)} variants")
-                
-                # Create pivot table for this gene
-                gene_pivot = gene_df.pivot(index='sample_name',
-                                         columns='chrposrefalt',
-                                         values='zygosity')
-                gene_pivot = gene_pivot.fillna('')
-                gene_pivot['variant_string'] = gene_pivot.apply(lambda row: ';'.join([f"{pos}({zyg})" if (zyg == 'HOM' or zyg == 'HEMI') else pos 
-                                                        for pos, zyg in row.items() if zyg != '']), axis=1)
-                log.info(f"{gene_pivot.head()}")
-                
-                gene_pivot_counts = gene_pivot.groupby('variant_string').size().reset_index(name='count')
-
-                gene_pivot_counts = gene_pivot_counts.sort_values('count', ascending=False)
-                gene_pivot_counts['GENE'] = gene
-                all_gene_pivot_counts.append(gene_pivot_counts)
-
-            pivot_df_counts = pd.concat(all_gene_pivot_counts)
-
-            #TODO: we need to get an aggregation strategy to display positives in diplotypes
-            #if moi_uri is not None:
-                # Count positive genotypes per variant
-            #    positive_counts = vcf_df.groupby('chrposrefalt')['positive_genotype'].apply(lambda x: (x == 'Yes').sum()).to_dict()
-            #    pivot_as_df['positive_count'] = pivot_as_df.columns.map(positive_counts).fillna(0)
-                
+            gene_pivot = gene_df.pivot(index='sample_name',
+                                     columns='chrposrefalt',
+                                     values='zygosity')
+            gene_pivot = gene_pivot.fillna('')
+            gene_pivot['variant_string'] = gene_pivot.apply(lambda row: ';'.join([f"{pos}({zyg})" if (zyg == 'HOM' or zyg == 'HEMI') else pos 
+                                                    for pos, zyg in row.items() if zyg != '']), axis=1)
             
-            vcf_df_zygosity = (
-                vcf_df.groupby(
-                    [
-                        "contig", 
-                        "pos_start",
-                        "ref",
-                        "alt",
-                        "GENE",
-                        "CLINVAR_ID",
-                        "zygosity"
-                    ]
-                )["sample_name"]
-                .nunique()
-                .reset_index(name="sample_count")
-            )
+            gene_pivot_counts = gene_pivot.groupby('variant_string').size().reset_index(name='count')
+            gene_pivot_counts = gene_pivot_counts.sort_values('count', ascending=False)
+            gene_pivot_counts['GENE'] = gene
+            all_gene_pivot_counts.append(gene_pivot_counts)
 
-            vcf_df_positivity = (
-                vcf_df.groupby(
-                    [
-                        "contig",
-                        "pos_start",
-                        "ref",
-                        "alt",
-                        "positive_genotype"
-                    ]
-                )["sample_name"]
-                .nunique()
-                .reset_index(name="sample_count")
-            )
+        return pd.concat(all_gene_pivot_counts)
+
+    def get_zygosity_counts(vcf_df):
+        vcf_df_zygosity = (
+            vcf_df.groupby(
+                ["contig", "pos_start", "ref", "alt", "GENE", "CLINVAR_ID", "zygosity"]
+            )["sample_name"]
+            .nunique()
+            .reset_index(name="sample_count")
+        )
+
+        vcf_df_positivity = (
+            vcf_df.groupby(
+                ["contig", "pos_start", "ref", "alt", "positive_genotype"]
+            )["sample_name"]
+            .nunique()
+            .reset_index(name="sample_count")
+        )
+
+        log.info("pivoting by zygosity")
+        vcf_df_zygosity_pivoted = vcf_df_zygosity.pivot_table(
+            index=["contig", "pos_start", "ref", "alt", "GENE", "CLINVAR_ID"],
+            columns="zygosity",
+            values="sample_count",
+            fill_value=0
+        ).reset_index()
+
+        log.info("pivoting by positivity") 
+        vcf_df_positivity_pivoted = vcf_df_positivity.pivot_table(
+            index=["contig", "pos_start", "ref", "alt"],
+            columns="positive_genotype",
+            values="sample_count",
+            fill_value=0
+        ).reset_index()
+        vcf_df_positivity_pivoted.rename(columns={"Yes":"Positive"},inplace=True)
+        vcf_df_positivity_pivoted.drop(columns=['No'],inplace=True)
+
+        required_columns = ["contig", "pos_start", "ref", "alt"]
+        log.info("merge zygosity and positivity")
+        return pd.merge(
+            vcf_df_zygosity_pivoted,
+            vcf_df_positivity_pivoted,
+            on=required_columns,
+            how="left"
+        )
+
+    if verbose:
+        log.info(f"beginngs query using vcf_uri: {vcf_uri} and moaavt:{moaavt_uri}")
+
+    variant_df = load_variant_data(moaavt_uri, tiledb_cfg)
+    log.info(f"{len(variant_df)} variants found in the moaavt")
+
+    if use_blocklist and blocklist_uri is not None:
+        variant_df = apply_blocklist(variant_df=variant_df, blocklist_uri=blocklist_uri, tiledb_cfg=tiledb_cfg)
+
+    if bed_lines:
+        variant_df = filter_variants_by_bed(variant_df, bed_lines)
+
+    table = get_genotype_data(vcf_uri, variant_df, batch_mode, max_sample_batch_size, threads, verbose, tiledb_cfg)
+
+    if len(table) == 0:
+        log.info("No variants of interest found in the TileDB-VCF dataset")
+        return pa.Table.from_pandas(table)
+
+    table = table.drop("count", axis=1)
+    variant_df_core = variant_df[["CHROM", "POS", "REF", "ALT", "GENE", "CLINVAR_ID"]]
+    variant_df_core = variant_df_core.rename(
+        columns={"CHROM": "contig", "POS": "pos_start", "REF": "ref", "ALT": "alt"}
+    )
+    table = table.merge(variant_df_core, on=["contig", "pos_start", "ref", "alt"], how="inner")
+
+    table = process_compound_heterozygosity(table)
+    vcf_df = table.to_pandas()
+    vcf_df = merge_sample_metadata(vcf_df, sample_metadata_uri, sample_use_uri, population_source, metadata_attrs)
 
 
-            log.info(f"pivoting by zygosity")
-            vcf_df_zygosity_pivoted = vcf_df_zygosity.pivot_table(
-                index=["contig", "pos_start", "ref", "alt", "GENE", "CLINVAR_ID"],
-                columns="zygosity",
-                values="sample_count",
-                fill_value=0
-            ).reset_index()
-            
+    if population_source not in metadata_attrs["sample_metadata_attrs"]:
+        raise ValueError(f"Unknown sample metadata population source: {population_source}")
+    if population_source not in metadata_attrs["sex_fields"]:
+        raise ValueError(f"Unknown sex field population source: {population_source}")
+    
+    sample_metadata_attrs = metadata_attrs["sample_metadata_attrs"][population_source]
+    sex_field = metadata_attrs["sex_fields"][population_source]["field"]
+    sex_lookup = metadata_attrs["sex_fields"][population_source]["lookup"]
+
+    if moi_uri is not None:
+        with tiledb.open(moi_uri,config=tiledb_cfg) as moi_fh:
+            moi_df = moi_fh.df[:]
+
+        gene_poi_map = {gene.upper(): poi for gene, poi in zip(moi_df["GENE"], moi_df["MOI"])}
+        vcf_df["moi"] = vcf_df["GENE"].map(gene_poi_map)
+        vcf_df["positive_genotype"] = vcf_df.apply(positive_genotype, sex_field=sex_field, sex_lookup=sex_lookup, population_source=population_source, axis=1)
+    else:
+        vcf_df["positive_genotype"] = "N/A"
+    
+    vcf_df = vcf_df.drop_duplicates(subset=['sample_name', 'contig', 'pos_start', 'ref', 'alt'])
+    vcf_df['chrposrefalt'] = vcf_df.apply(lambda row: f"{row['contig']}:{row['pos_start']}:{row['ref']}>{row['alt']}", axis=1)
+
+    if aggregate_variants:
+        pivot_df_counts = aggregate_variants_data(vcf_df)
+        vcf_df = get_zygosity_counts(vcf_df)
 
 
-            log.info(f"pivoting by positivity")
-            vcf_df_positivity_pivoted = vcf_df_positivity.pivot_table(
-                index=["contig", "pos_start", "ref", "alt"],
-                columns="positive_genotype",
-                values="sample_count",
-                fill_value=0
-            ).reset_index()
-            vcf_df_positivity_pivoted.rename(columns={"Yes":"Positive"},inplace=True)
-            vcf_df_positivity_pivoted.drop(columns=['No'],inplace=True)
 
-            # Check for missing columns
-            required_columns = ["contig", "pos_start", "ref", "alt"]
-            for col in required_columns:
-                if col not in vcf_df_zygosity_pivoted.columns:
-                    print(f"Missing column in vcf_df_zygosity_pivoted: {col}")
-                if col not in vcf_df_positivity_pivoted.columns:
-                    print(f"Missing column in vcf_df_positivity_pivoted: {col}")
+    genotypes = pa.Table.from_pandas(vcf_df)
+    diplotypes = pa.Table.from_pandas(pivot_df_counts)
+    
+    @dataclass
+    class BeginNGSResult:
+        genotypes: pa.Table
+        diplotypes: pa.Table
 
-            # Perform the merge
-            log.info(f"merge zygosity and positivity")
-            vcf_df = pd.merge(
-                vcf_df_zygosity_pivoted,
-                vcf_df_positivity_pivoted,
-                on=required_columns,
-                how="left"
-            )
-
-        @dataclass
-        class BeginNGSResult:
-            genotypes: pa.Table
-            diplotypes: pa.Table
-        genotypes = pa.Table.from_pandas(vcf_df)
-        diplotypes = pa.Table.from_pandas(pivot_df_counts)
-        return BeginNGSResult(genotypes=genotypes, diplotypes=diplotypes)
+    return BeginNGSResult(genotypes=genotypes, diplotypes=diplotypes)
     
 def test_beginngs():
 
 
     
     df = beginngs_query(
-        vcf_uri="tiledb://XXXXXXXXXXXXXXXX",
-        moaavt_uri="tiledb://XXXXXXXXXXXXXXXX",
-        moi_uri="tiledb://XXXXXXXXXXXXXXXX",
-        blocklist_uri="tiledb://XXXXXXXXXXXXXXXX",
-        sample_metadata_uri="tiledb://XXXXXXXXXXXXXXXX",
-        sample_use_uri="tiledb://XXXXXXXXXXXXXXXX",
+        vcf_uri="tiledb://XXXXXXX",
+        moaavt_uri="tiledb://XXXXXXX",
+        moi_uri="tiledb://XXXXXXX",
+        blocklist_uri="tiledb://XXXXXXX",
+        sample_metadata_uri="tiledb://XXXXXXX",
+        sample_use_uri="tiledb://XXXXXXX",
         use_blocklist=True,
         bed_lines=None,
-        tiledb_cfg=None
+        tiledb_cfg=None,
+        batch_mode=False,
+        max_sample_batch_size=2000,
+        threads=4,
+        namespace=None,
+        aggregate_variants=True,
+        remove_sample_name_suffix=True,
+        verbose=False,
+        population_source="rady"
     ).to_pandas()
     print(df)
 
