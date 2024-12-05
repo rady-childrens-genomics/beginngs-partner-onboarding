@@ -12,8 +12,10 @@ The broader goal is to refine understanding of the genetic basis of the natural 
 
 # Input Overview
 
-- Variants of interest (currently BeginNGS v2, 53,855 P and LP variants that map to 342 genes, 412 SCGD, and 1,603 SCGD therapeutic interventions) is normally encapsulated as a fixed resource inthe UDF, but can be implemented as an parameter. This is pre-annotated with consequence and population frequency information, but only chr-pos-ref-alt is used for the query itself.
-
+- [Variants of interest](data/variants_of_interest_20231108.csv) (currently BeginNGS v2, 53,855 P and LP variants that map to 342 genes, 412 SCGD, and 1,603 SCGD therapeutic interventions) is normally encapsulated as a fixed resource inthe UDF, but can be implemented as an parameter. This is pre-annotated with consequence and population frequency information, but only chr-pos-ref-alt is used for the query itself
+- [Blocklist](data/blocklist_20240329.csv) - entries classified as NSDCC (non-severe disease causing in childhood)
+- [MOI](data/moi_20240805.txt) - mode of inheritance information
+ 
 ## Federated Query
 
 <img width="1589" alt="federated" src="https://github.com/user-attachments/assets/88c87f9f-b0a3-4754-8932-d6733adb5490">
