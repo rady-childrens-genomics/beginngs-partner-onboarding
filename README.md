@@ -22,6 +22,14 @@ The broader goal is to refine understanding of the genetic basis of the natural 
 
 ## Implementation for non-TileDB Users
 
+The high level approach is:
+1. Apply blocklist to variants of interest (if using blocklist)
+2. Obtain vcf genotypes for variants of interest, merge on chr,pos,ref,alt
+3. Classify compound hets, looking for co-occurring hets in sample/gene groups 
+4. Merge sample metadata to get sex, use only consented subjects
+5. Compute positive_genotypes using MOI rules
+6. For each gene/subject grouping, compose a concatenated string of observed hit variants (diplotypes)
+   
 <img width="6930" alt="beginngs_flow" src="beginngs_flow.png">
 
 ### Source Code
