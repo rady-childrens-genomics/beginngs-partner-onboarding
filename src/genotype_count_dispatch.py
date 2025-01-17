@@ -18,7 +18,6 @@ from typing import List, Optional
 from tiledb.cloud.utilities import get_logger
 from tiledb.cloud.vcf.vcf_toolbox import df_transform
 from tiledb.cloud.vcf.vcf_toolbox.annotate import _annotate
-from tiledb.cloud.vcf.vcf_toolbox.annotate import _annotate
 from vcf_federated.filestore import read_lines
 from tiledb.cloud.utilities import run_dag
 
@@ -329,9 +328,6 @@ def genotype_query_by_variants(
         if not variant.startswith("#"):
             chrom, pos, _, _ = variant.split("-")
             regions_by_chrom[chrom].append(f"{chrom}:{pos}-{pos}")
-        if not variant.startswith("#"):
-            chrom, pos, _, _ = variant.split("-")
-            regions_by_chrom[chrom].append(f"{chrom}:{pos}-{pos}")
 
     log = get_logger()
     log.propagate = False
@@ -385,72 +381,6 @@ def genotype_query_by_variants(
         agg_tables = pa.Table.from_pandas(agg_tables.to_pandas().drop_duplicates(subset=['sample_name', 'contig', 'pos_start', 'ref', 'alt']))
     return agg_tables
 
-def genotype_query_by_bed_regions(
-    vcf_uri: str,
-    *,
-    bed_regions: List[str],
-    allele_string_mode: bool = False,
-    max_sample_batch_size: int = 1000,
-    use_large_node: bool = False,
-    verbose: bool = False,
-    drop_samples: bool = True,
-    threads=2,
-    tiledb_cfg: Optional[dict] = None,
-) -> pa.Table:
-    import tiledb.cloud.vcf
-
-    # Create a list of regions for each chromosome
-    regions_by_chrom = defaultdict(list)
-    for region in bed_regions:
-        # echo region being like chr1:0-999
-        # BED is 0-based non-inclusive.
-        # Covert to 1-based inclusive for VCF.
-        # split on : or any whitespace
-        # split on : or any whitespace
-        chrom, start_pos, end_pos = (
-            region.split(":")[0],
-            int(region.split(":")[1].split("-")[0]) + 1,
-            int(region.split(":")[1].split("-")[1]),
-        )
-        regions_by_chrom[chrom].append(f"{chrom}:{start_pos}-{end_pos}")
-
-    # Read list of all samples
-    samples = read_samples(vcf_uri, tiledb_cfg)
-
-    def read_per_chrom(regions: List[str]) -> pa.Table:
-        max_workers = math.ceil(len(samples) / max_sample_batch_size)
-
-        # Submit the distributed query
-        table = tiledb.cloud.vcf.read(
-            vcf_uri,
-            regions=regions,
-            samples=samples,
-            transform_result=transform_vcf(
-                split_multiallelic=True,
-                add_zygosity=not allele_string_mode,
-                add_allele_string=allele_string_mode,
-                verbose=verbose,
-                drop_samples=drop_samples,
-            ),
-            max_sample_batch_size=max_sample_batch_size,
-            max_workers=max_workers,
-            num_region_partitions=1,
-            resource_class="large" if use_large_node else None,
-            verbose=verbose,
-            config=tiledb_cfg,
-        )
-
-        return table
-
-    # Read each chromosome in parallel
-    # threads = len(regions_by_chrom.values())
-    # threads = len(regions_by_chrom.values())
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        tables = list(executor.map(read_per_chrom, regions_by_chrom.values()))
-
-    return aggregate_tables(tables)
-
-
 def compute_compound_heterozygosity(vcf_df: pa.Table) -> pa.Table:
     """
     This takes an annotated vcf dataframe with a GENE column and zygosity column to determine cmpd hets
@@ -484,146 +414,13 @@ def compute_compound_heterozygosity(vcf_df: pa.Table) -> pa.Table:
     return pa.Table.from_pandas(vcf_df.reset_index())
 
 
-def compute_gene_diplotype(vcf_df: pa.Table, gene: str) -> pa.Table:
-    """
-    This takes an annotated vcf dataframe, with a GENE column and a GENE to determine all diplotypes that exist in that gene
-    """
-    log = get_logger()
-    vcf_df = vcf_df.to_pandas()
-    vcf_df = vcf_df[vcf_df['GENE'] == gene]
-
-    grouped_by_sample = (
-            vcf_df.groupby(["sample_name"])
-    )
-    #for each sample display all the allele strings
-    diplotypes = []
-    for sample, sample_df in grouped_by_sample:
-        allele_strings = sample_df["allele_string"].tolist()
-        diplotypes.append({
-            "sample_name": sample,
-            "diplotype": "/".join(sorted(allele_strings))
-        })
-    
-    diplotype_df = pd.DataFrame(diplotypes)
-    vcf_df = vcf_df.merge(diplotype_df, on="sample_name", how="left")
-    hets = vcf_df[vcf_df["zygosity"] == "HET"]
-    if len(hets) > 0:
-        grouped_hets = (
-            hets.groupby(["sample_name", "GENE"]).size().reset_index(name="het_count")
-        )
-        compound_hets = grouped_hets[grouped_hets["het_count"] > 1].copy()
-        if len(compound_hets) > 0:
-            # avoid the A value is trying to be set on a copy of a slice from a DataFrame error
-            compound_hets.loc[:, "compound_event"] = "CMPD_HET"
-            compound_hets.loc[:, "zygosity"] = "HET"  # for the join
-            log.info(f"{len(compound_hets)} compound hets found")
-            vcf_df = vcf_df.merge(
-                compound_hets, on=["sample_name", "zygosity", "GENE"], how="left"
-            )
-        else:
-            # columns should match up
-            vcf_df.loc[:, "het_count"] = 0
-            vcf_df.loc[:, "compound_event"] = ""
-    else:
-        vcf_df.loc[:, "het_count"] = 0
-        vcf_df.loc[:, "compound_event"] = ""
-
-    vcf_df["het_count"] = vcf_df["het_count"].fillna(0)
-    vcf_df["het_count"] = vcf_df["het_count"].astype("int64")
-    return pa.Table.from_pandas(vcf_df.reset_index())
-
-
 # Endpoints fot the dispatch function
 
-
-def gc_variants(
-    vcf_uri: str,
-    *,
-    variants_uri: str,
-    variants: List[str],
-    allele_string_mode: bool = False,
-    max_sample_batch_size: int = 1000,
-    use_large_node: bool = False,
-    tiledb_cfg=None,
-    verbose: bool = False,
-) -> pa.Table:
-
-    # Read variants
-    if variants_uri is not None:
-        variants = [
-            variant
-            for variant in read_lines(variants_uri)
-            if not variant.startswith("#")
-        ]
-
-    return genotype_query_by_variants(
-        vcf_uri,
-        variants=variants,
-        allele_string_mode=allele_string_mode,
-        max_sample_batch_size=max_sample_batch_size,
-        use_large_node=use_large_node,
-        verbose=verbose,
-        tiledb_cfg=tiledb_cfg,
-    )
-
-
-def gc_bed(
-    vcf_uri: str,
-    *,
-    bed_lines: List[str],
-    allele_string_mode: bool = False,
-    max_sample_batch_size: int = 1000,
-    use_large_node: bool = False,
-    tiledb_cfg: Optional[dict] = None,
-    verbose: bool = False,
-) -> pa.Table:
-    # Convert BED lines to BED regions
-    bed_regions = [
-        f"{line.split()[0]}:{line.split()[1]}-{line.split()[2]}" for line in bed_lines
-    ]
-
-    return genotype_query_by_bed_regions(
-        vcf_uri,
-        bed_regions=bed_regions,
-        allele_string_mode=allele_string_mode,
-        max_sample_batch_size=max_sample_batch_size,
-        use_large_node=use_large_node,
-        tiledb_cfg=tiledb_cfg,
-        verbose=verbose,
-    )
 
 
 from vcf_federated.allele_count_dispatch import query_ensembl_by_gene_name
 from vcf_federated.allele_count_dispatch import to_regions
 
-
-def gc_gene(
-    vcf_uri: str,
-    *,
-    ens_uri: str,
-    gene_name: str,
-    allele_string_mode: bool = False,
-    max_sample_batch_size: int = 1000,
-    use_large_node: bool = False,
-    tiledb_cfg: Optional[dict] = None,
-    verbose: bool = False,
-):
-    # Get BED regions for the gene
-    kwargs = {"ensembl_uri": ens_uri}
-    table = query_ensembl_by_gene_name(
-        gene_name=gene_name, tiledb_cfg=tiledb_cfg, **kwargs
-    )
-    bed_regions = to_regions(table, bed=True)
-
-    return genotype_query_by_bed_regions(
-        vcf_uri,
-        bed_regions=bed_regions,
-        allele_string_mode=allele_string_mode,
-        max_sample_batch_size=max_sample_batch_size,
-        use_large_node=use_large_node,
-        tiledb_cfg=tiledb_cfg,
-        verbose=verbose,
-    )
 
 
 def fetch_approved_sample_metadata(
