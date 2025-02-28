@@ -18,6 +18,7 @@ from typing import List, Optional
 from tiledb.cloud.utilities import get_logger
 from tiledb.cloud.vcf.vcf_toolbox import df_transform
 from tiledb.cloud.vcf.vcf_toolbox.annotate import _annotate
+from tiledb.cloud.vcf.vcf_toolbox.annotate import _annotate
 from vcf_federated.filestore import read_lines
 from tiledb.cloud.utilities import run_dag
 
@@ -328,6 +329,9 @@ def genotype_query_by_variants(
         if not variant.startswith("#"):
             chrom, pos, _, _ = variant.split("-")
             regions_by_chrom[chrom].append(f"{chrom}:{pos}-{pos}")
+        if not variant.startswith("#"):
+            chrom, pos, _, _ = variant.split("-")
+            regions_by_chrom[chrom].append(f"{chrom}:{pos}-{pos}")
 
     log = get_logger()
     log.propagate = False
@@ -381,12 +385,147 @@ def genotype_query_by_variants(
         agg_tables = pa.Table.from_pandas(agg_tables.to_pandas().drop_duplicates(subset=['sample_name', 'contig', 'pos_start', 'ref', 'alt']))
     return agg_tables
 
+def genotype_query_by_bed_regions(
+    vcf_uri: str,
+    *,
+    bed_regions: List[str],
+    allele_string_mode: bool = False,
+    max_sample_batch_size: int = 1000,
+    use_large_node: bool = False,
+    verbose: bool = False,
+    drop_samples: bool = True,
+    threads=2,
+    tiledb_cfg: Optional[dict] = None,
+) -> pa.Table:
+    import tiledb.cloud.vcf
+
+    # Create a list of regions for each chromosome
+    regions_by_chrom = defaultdict(list)
+    for region in bed_regions:
+        # echo region being like chr1:0-999
+        # BED is 0-based non-inclusive.
+        # Covert to 1-based inclusive for VCF.
+        # split on : or any whitespace
+        # split on : or any whitespace
+        chrom, start_pos, end_pos = (
+            region.split(":")[0],
+            int(region.split(":")[1].split("-")[0]) + 1,
+            int(region.split(":")[1].split("-")[1]),
+        )
+        regions_by_chrom[chrom].append(f"{chrom}:{start_pos}-{end_pos}")
+
+    # Read list of all samples
+    samples = read_samples(vcf_uri, tiledb_cfg)
+
+    def read_per_chrom(regions: List[str]) -> pa.Table:
+        max_workers = math.ceil(len(samples) / max_sample_batch_size)
+
+        # Submit the distributed query
+        table = tiledb.cloud.vcf.read(
+            vcf_uri,
+            regions=regions,
+            samples=samples,
+            transform_result=transform_vcf(
+                split_multiallelic=True,
+                add_zygosity=not allele_string_mode,
+                add_allele_string=allele_string_mode,
+                verbose=verbose,
+                drop_samples=drop_samples,
+            ),
+            max_sample_batch_size=max_sample_batch_size,
+            max_workers=max_workers,
+            num_region_partitions=1,
+            resource_class="large" if use_large_node else None,
+            verbose=verbose,
+            config=tiledb_cfg,
+        )
+
+        return table
+
+    # Read each chromosome in parallel
+    # threads = len(regions_by_chrom.values())
+    # threads = len(regions_by_chrom.values())
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        tables = list(executor.map(read_per_chrom, regions_by_chrom.values()))
+
+    return aggregate_tables(tables)
+
+
 def compute_compound_heterozygosity(vcf_df: pa.Table) -> pa.Table:
     """
     This takes an annotated vcf dataframe with a GENE column and zygosity column to determine cmpd hets
     """
     log = get_logger()
     vcf_df = vcf_df.to_pandas()
+    hets = vcf_df[vcf_df["zygosity"] == "HET"]
+    
+    homs = vcf_df[vcf_df["zygosity"] == "HOM_ALT"]
+    #just unique sample_name,GENE,zygosity
+    homs = homs[["sample_name", "GENE"]].drop_duplicates()
+    homs['passenger_het'] = True
+
+    if len(hets) > 0:
+        grouped_hets = (
+            hets.groupby(["sample_name", "GENE"]).size().reset_index(name="het_count")
+        )
+        compound_hets = grouped_hets[grouped_hets["het_count"] > 1].copy()
+        if len(compound_hets) > 0:
+            # avoid the A value is trying to be set on a copy of a slice from a DataFrame error
+            compound_hets.loc[:, "compound_event"] = "CMPD_HET"
+            compound_hets.loc[:, "zygosity"] = "HET"  # for the join
+            log.info(f"{len(compound_hets)} compound hets found")
+            vcf_df = vcf_df.merge(
+                compound_hets, on=["sample_name", "zygosity", "GENE"], how="left"
+            )
+        else:
+            # columns should match up
+            vcf_df.loc[:, "het_count"] = 0
+            vcf_df.loc[:, "compound_event"] = ""
+    else:
+        vcf_df.loc[:, "het_count"] = 0
+        vcf_df.loc[:, "compound_event"] = ""
+
+    if len(homs) > 0:
+    #set all vcf_df hets to compound_event HET_PASS if they are in homs sample, GENE
+        log.info(f"found {len(homs)} homs")
+        #import pdb; pdb.set_trace()
+        vcf_df = vcf_df.merge(homs, on=["sample_name", "GENE"], how="left")
+        vcf_df["passenger_het"] = vcf_df["passenger_het"].fillna(False)
+        #if passenger_het is True, set compound_event to HET_PASS just using pandas not numpy
+        vcf_df.loc[(vcf_df["passenger_het"] == True) & (vcf_df["zygosity"] == "HET"), "compound_event"] = "HET_PASS"
+        #remove passenger_het
+        #vcf_df = vcf_df.drop(columns=["passenger_het"])
+    else:
+        vcf_df.loc[:, "passenger_het"] = False
+    #if compound_event is HET_PASS, set zygosity to HET        
+
+    vcf_df["het_count"] = vcf_df["het_count"].fillna(0)
+    vcf_df["het_count"] = vcf_df["het_count"].astype("int64")
+    return pa.Table.from_pandas(vcf_df.reset_index())
+
+
+def compute_gene_diplotype(vcf_df: pa.Table, gene: str) -> pa.Table:
+    """
+    This takes an annotated vcf dataframe, with a GENE column and a GENE to determine all diplotypes that exist in that gene
+    """
+    log = get_logger()
+    vcf_df = vcf_df.to_pandas()
+    vcf_df = vcf_df[vcf_df['GENE'] == gene]
+
+    grouped_by_sample = (
+            vcf_df.groupby(["sample_name"])
+    )
+    #for each sample display all the allele strings
+    diplotypes = []
+    for sample, sample_df in grouped_by_sample:
+        allele_strings = sample_df["allele_string"].tolist()
+        diplotypes.append({
+            "sample_name": sample,
+            "diplotype": "/".join(sorted(allele_strings))
+        })
+    
+    diplotype_df = pd.DataFrame(diplotypes)
+    vcf_df = vcf_df.merge(diplotype_df, on="sample_name", how="left")
     hets = vcf_df[vcf_df["zygosity"] == "HET"]
     if len(hets) > 0:
         grouped_hets = (
@@ -417,10 +556,94 @@ def compute_compound_heterozygosity(vcf_df: pa.Table) -> pa.Table:
 # Endpoints fot the dispatch function
 
 
+def gc_variants(
+    vcf_uri: str,
+    *,
+    variants_uri: str,
+    variants: List[str],
+    allele_string_mode: bool = False,
+    max_sample_batch_size: int = 1000,
+    use_large_node: bool = False,
+    tiledb_cfg=None,
+    verbose: bool = False,
+) -> pa.Table:
+
+    # Read variants
+    if variants_uri is not None:
+        variants = [
+            variant
+            for variant in read_lines(variants_uri)
+            if not variant.startswith("#")
+        ]
+
+    return genotype_query_by_variants(
+        vcf_uri,
+        variants=variants,
+        allele_string_mode=allele_string_mode,
+        max_sample_batch_size=max_sample_batch_size,
+        use_large_node=use_large_node,
+        verbose=verbose,
+        tiledb_cfg=tiledb_cfg,
+    )
+
+
+def gc_bed(
+    vcf_uri: str,
+    *,
+    bed_lines: List[str],
+    allele_string_mode: bool = False,
+    max_sample_batch_size: int = 1000,
+    use_large_node: bool = False,
+    tiledb_cfg: Optional[dict] = None,
+    verbose: bool = False,
+) -> pa.Table:
+    # Convert BED lines to BED regions
+    bed_regions = [
+        f"{line.split()[0]}:{line.split()[1]}-{line.split()[2]}" for line in bed_lines
+    ]
+
+    return genotype_query_by_bed_regions(
+        vcf_uri,
+        bed_regions=bed_regions,
+        allele_string_mode=allele_string_mode,
+        max_sample_batch_size=max_sample_batch_size,
+        use_large_node=use_large_node,
+        tiledb_cfg=tiledb_cfg,
+        verbose=verbose,
+    )
+
 
 from vcf_federated.allele_count_dispatch import query_ensembl_by_gene_name
 from vcf_federated.allele_count_dispatch import to_regions
 
+
+def gc_gene(
+    vcf_uri: str,
+    *,
+    ens_uri: str,
+    gene_name: str,
+    allele_string_mode: bool = False,
+    max_sample_batch_size: int = 1000,
+    use_large_node: bool = False,
+    tiledb_cfg: Optional[dict] = None,
+    verbose: bool = False,
+):
+    # Get BED regions for the gene
+    kwargs = {"ensembl_uri": ens_uri}
+    table = query_ensembl_by_gene_name(
+        gene_name=gene_name, tiledb_cfg=tiledb_cfg, **kwargs
+    )
+    bed_regions = to_regions(table, bed=True)
+
+    return genotype_query_by_bed_regions(
+        vcf_uri,
+        bed_regions=bed_regions,
+        allele_string_mode=allele_string_mode,
+        max_sample_batch_size=max_sample_batch_size,
+        use_large_node=use_large_node,
+        tiledb_cfg=tiledb_cfg,
+        verbose=verbose,
+    )
 
 
 def fetch_approved_sample_metadata(
@@ -526,14 +749,14 @@ def apply_blocklist(variant_df, blocklist_uri, tiledb_cfg):
         return variant_df
 
 
-def positive_genotype(row, sex_field, sex_lookup, population_source):
+def positive_genotype(row, sex_field, sex_lookup, accept_passenger_hets=False):
     log = get_logger()
     if row["moi"] == "Pattern unknown":
         return "Unknown"
     elif row["moi"] == "AD":
         return "Yes"
     elif row["moi"] == "AR":
-        if row["zygosity"] == "HOM_ALT" or row["compound_event"] == "CMPD_HET":
+        if row["zygosity"] == "HOM_ALT" or row["compound_event"] == "CMPD_HET" or (accept_passenger_hets and row["compound_event"] == "HET_PASS"):
             return "Yes"
         else:
             return "No"
@@ -542,7 +765,7 @@ def positive_genotype(row, sex_field, sex_lookup, population_source):
             return "No"
         else:
             if row[sex_field] == sex_lookup["Female"]:
-                if row["zygosity"] == "HOM_ALT" or row["compound_event"] == "CMPD_HET":
+                if row["zygosity"] == "HOM_ALT" or row["compound_event"] == "CMPD_HET" or (accept_passenger_hets and row["compound_event"] == "HET_PASS"):
                     return "Yes"
             else:
                 if row["zygosity"] == "HEMI":
@@ -572,9 +795,12 @@ def beginngs_query(
     batch_mode: bool = False,
     max_sample_batch_size: int = 2000,
     threads: int = 4,
+    aggregate_variants=True,
     verbose: bool = False,
     population_source: str = "rady",
+    format_style: str = 'alexion',
     metadata_attrs: dict = None,
+    positive_only: bool = True,
 ):
     """
     Query variants and genotypes from a mother-of-all-annotated variants table (MOAAVT).
@@ -596,6 +822,7 @@ def beginngs_query(
         batch_mode: Whether to process samples in batches (default: False)
         max_sample_batch_size: Maximum samples per batch when batch_mode=True (default: 2000)
         threads: Number of threads to use for processing (default: 4)
+        aggregate_variants: Whether to aggregate variant counts (default: True)
         verbose: Enable verbose logging (default: False)
         population_source: Source population for metadata lookup (default: "rady")
 
@@ -604,7 +831,6 @@ def beginngs_query(
     """
     log = get_logger()
     log.propagate = False
-    import tomli
     import pathlib
 
     import json
@@ -721,10 +947,10 @@ def beginngs_query(
         
         return vcf_df
 
-    def aggregate_variants_data(vcf_df):
+    def aggregate_variants_data(vcf_df,positive_only=True):
         log.info("Group by variant")
         log.info("Set zygosity for compound_event")
-        vcf_df.loc[vcf_df['compound_event'] == 'CMPD_HET', 'zygosity'] = 'CMPD_HET'
+        vcf_df.loc[(vcf_df['compound_event'] == 'CMPD_HET') | (vcf_df['compound_event'] == 'HET_PASS'), 'zygosity'] = 'CMPD_HET'
 
         if vcf_df.duplicated(subset=['sample_name', 'chrposrefalt']).any():
             duplicates = vcf_df[vcf_df.duplicated(subset=['sample_name', 'chrposrefalt'], keep=False)]
@@ -732,24 +958,136 @@ def beginngs_query(
             log.info(duplicates)
             raise ValueError("Found duplicate sample_name/variant combinations - cannot pivot. Please deduplicate first.")
 
+        if positive_only:
+            log.info(f"There are {len(vcf_df)} variants before positive only filter")
+            vcf_df = vcf_df[vcf_df['positive_genotype'] == 'Yes']
+            log.info(f"There are {len(vcf_df)} variants after positive only filter")
+
         unique_genes = sorted(vcf_df['GENE'].unique())
         log.info(f"Found {len(unique_genes)} unique genes")
 
         all_gene_pivot_counts = []
         for gene in unique_genes:
+            #if gene == 'GALT':
+            #    import pdb; pdb.set_trace()
             gene_df = vcf_df[vcf_df['GENE'] == gene]
+            #make sure this is ordered by pos_start
+            gene_df = gene_df.sort_values('pos_start')
+            #get the MOI for this gene
+            moi = vcf_df[vcf_df['GENE'] == gene]['moi'].unique()[0]
+            #assert this MOI is the same for all variants in this gene
+            assert len(vcf_df[vcf_df['GENE'] == gene]['moi'].unique()) == 1
             log.info(f"Processing gene {gene} with {len(gene_df)} variants")
             
             gene_pivot = gene_df.pivot(index='sample_name',
                                      columns='chrposrefalt',
                                      values='zygosity')
             gene_pivot = gene_pivot.fillna('')
-            gene_pivot['variant_string'] = gene_pivot.apply(lambda row: ';'.join([f"{pos}({zyg})" if (zyg == 'HOM' or zyg == 'HEMI') else pos 
-                                                    for pos, zyg in row.items() if zyg != '']), axis=1)
+            gene_pivot_orig = gene_pivot.copy()
+            def sort_by_zygosity(items):
+                # Define zygosity order (highest priority first)
+                zygosity_order = {
+                    'HOM_ALT': 0,
+                    'CMPD_HET': 1,
+                    'HEMI': 2,
+                    'HET': 3
+                }
+                # Sort items by zygosity order, then by position
+                return sorted(items, key=lambda x: (zygosity_order.get(x[1], 3), x[0]))
+
+            gene_pivot['DIPLOTYPE_RAW'] = gene_pivot_orig.apply(
+                lambda row: ';'.join(
+                    f"[{pos}]" if (zyg == 'CMPD_HET' or zyg == 'HEMI') 
+                    else f"[{pos}];[{pos}]" if zyg == 'HOM_ALT' 
+                    else f"[{pos}];+" 
+                    for pos, zyg in sort_by_zygosity(row.items()) if zyg != ''
+                ), 
+                axis=1
+            )
+
             
-            gene_pivot_counts = gene_pivot.groupby('variant_string').size().reset_index(name='count')
-            gene_pivot_counts = gene_pivot_counts.sort_values('count', ascending=False)
+
+            def combine_diplotypes(diplotype):
+                # Arrange diplotypes to segregate homozygous variants in separate brackets
+                # Keep heterozygous variants in the second bracket if they coexist with homozygous variants
+                # Compound het variants that do not coexist with homozygous variants should be segregated with
+                # the lowest position variant occupying the first bracket and the rest in the second bracket
+
+                #CFTR
+                #gene_pivot.loc['HG00113']['DIPLOTYPE'] [chr7-117548758-G-T];[chr7-117590400-G-C;chr7-117592169-C-T]
+                #gene_pivot.loc['HG01075']['DIPLOTYPE'] '[chr6-32039081-C-A;chr6-32040110-G-T];[chr6-32039081-C-A;chr6-32040110-G-T]'
+
+                #CYP21A2
+                #gene_pivot.loc['HG01708']['DIPLOTYPE'] '[chr6-32039081-C-A];[chr6-32039081-C-A;chr6-32038514-C-T]'
+
+                # Split into individual variants
+                variants = [v.strip('[]') for v in diplotype.split(';') if v]
+                
+                # If we don't have more than 2 variants, return original
+                if len(variants) <= 2:
+                    return diplotype
+                
+                # Count occurrences of each variant to determine homozygosity
+                variant_counts = {}
+                for variant in variants:
+                    variant_counts[variant] = variant_counts.get(variant, 0) + 1
+                
+                # Get unique variants while preserving order
+                unique_variants = list(dict.fromkeys(variants))
+                
+                # Separate homozygous and heterozygous variants
+                hom_variants = [v for v in unique_variants if variant_counts[v] > 1]
+                het_variants = [v for v in unique_variants if variant_counts[v] == 1]
+                
+                # Build diplotype string
+                result = []
+                
+                if len(unique_variants) >= 1:
+                    # First bracket: homozygous variants first, then first heterozygous variant if available
+                    first_bracket = []
+                    if hom_variants:
+                        first_bracket.extend(hom_variants)
+                    else:
+                        first_bracket.append(het_variants[0])
+                    result.append(f"[{';'.join(first_bracket)}]")
+                    #[chr3-122284869-C-T];+	HETEROZYGOUS	CASR	AD	2
+                    if not hom_variants and het_variants:  # Only heterozygous variants and at least one exists
+                        first_bracket.append("+")
+                    
+                    # Second bracket: homozygous variants first, then remaining heterozygous variants
+                    second_bracket = []
+                    second_bracket.extend(hom_variants)  # Include homozygous variants again
+                    if hom_variants and het_variants:
+                        second_bracket.append(het_variants[0])
+                    elif len(het_variants) > 1:
+                        # compound het, one in each bracket
+                        second_bracket.extend(het_variants[1:])
+                    if second_bracket:
+                        #sort by pos in chr9-34649445-A-G ascending
+                        second_bracket.sort(key=lambda x: int(x.split('-')[1]))
+                        result.append(f"[{';'.join(second_bracket)}]")
+                
+                return ';'.join(result)
+                
+            gene_pivot['DIPLOTYPE'] = gene_pivot['DIPLOTYPE_RAW'].apply(combine_diplotypes)
+
+            gene_pivot['ZYGOSITY'] = gene_pivot_orig.apply(lambda row: 'HOMOZYGOUS' if 'HOM_ALT' in row.values else 'COMPOUND HETEROZYGOUS' if 'CMPD_HET' in row.values else  'HEMIZYGOUS' if 'HEMI' in row.values else 'HETEROZYGOUS' if any(v != '' for v in row.values) else '', axis=1)
+
+            if gene == 'G6PD':
+                import pdb; pdb.set_trace()
+            # This is for debugging
+            include_samples = False
+            if include_samples:
+                # Group by DIPLOTYPE and ZYGOSITY first
+                grouped = gene_pivot.groupby(['DIPLOTYPE', 'ZYGOSITY'])
+                # For each group, collect the sample names (which are in the index)
+                gene_pivot_counts = grouped.apply(lambda x: ', '.join(x.index)).reset_index(name='samples')
+            else:
+                gene_pivot_counts = gene_pivot.groupby(['DIPLOTYPE','ZYGOSITY']).size().reset_index(name='count')
+                gene_pivot_counts = gene_pivot_counts.sort_values('count', ascending=False)
             gene_pivot_counts['GENE'] = gene
+            gene_pivot_counts['MOI'] = moi
+            
             all_gene_pivot_counts.append(gene_pivot_counts)
 
         return pd.concat(all_gene_pivot_counts)
@@ -812,6 +1150,7 @@ def beginngs_query(
 
     table = get_genotype_data(vcf_uri, variant_df, batch_mode, max_sample_batch_size, threads, verbose, tiledb_cfg)
 
+    
     if len(table) == 0:
         log.info("No variants of interest found in the TileDB-VCF dataset")
         return pa.Table.from_pandas(table)
@@ -843,16 +1182,22 @@ def beginngs_query(
 
         gene_poi_map = {gene.upper(): poi for gene, poi in zip(moi_df["GENE"], moi_df["MOI"])}
         vcf_df["moi"] = vcf_df["GENE"].map(gene_poi_map)
-        vcf_df["positive_genotype"] = vcf_df.apply(positive_genotype, sex_field=sex_field, sex_lookup=sex_lookup, population_source=population_source, axis=1)
+        vcf_df["positive_genotype"] = vcf_df.apply(positive_genotype, sex_field=sex_field, sex_lookup=sex_lookup, accept_passenger_hets=True, axis=1)
     else:
         vcf_df["positive_genotype"] = "N/A"
     
     vcf_df = vcf_df.drop_duplicates(subset=['sample_name', 'contig', 'pos_start', 'ref', 'alt'])
-    vcf_df['chrposrefalt'] = vcf_df.apply(lambda row: f"{row['contig']}:{row['pos_start']}:{row['ref']}>{row['alt']}", axis=1)
+    if format_style == 'alexion':
+        vcf_df['chrposrefalt'] = vcf_df.apply(lambda row: f"{row['contig']}-{row['pos_start']}-{row['ref']}-{row['alt']}", axis=1)
+    else:
+        vcf_df['chrposrefalt'] = vcf_df.apply(lambda row: f"{row['contig']}:{row['pos_start']}:{row['ref']}:{row['alt']}", axis=1)
 
-    # aggregate variants
-    pivot_df_counts = aggregate_variants_data(vcf_df)
-    vcf_df = get_zygosity_counts(vcf_df)
+    import pdb; pdb.set_trace()
+    if aggregate_variants:
+        pivot_df_counts = aggregate_variants_data(vcf_df,positive_only=positive_only)
+        vcf_df = get_zygosity_counts(vcf_df)
+    else:
+        return vcf_df
 
 
 
