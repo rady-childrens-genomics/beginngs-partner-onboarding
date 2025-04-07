@@ -18,7 +18,8 @@ The broader goal is to refine understanding of the genetic basis of the natural 
  
 ## Federated Query
 
-<img width="1589" alt="federated" src="https://github.com/user-attachments/assets/88c87f9f-b0a3-4754-8932-d6733adb5490">
+![figure-run-federated-queries--UDF](https://github.com/user-attachments/assets/e38954d1-7e27-41c9-a461-8737e75462ce)
+
 
 ## Implementation for non-TileDB Users
 
@@ -30,7 +31,7 @@ The high level approach is:
 5. Compute positive_genotypes using MOI rules
 6. For each gene/subject grouping, compose a concatenated string of observed hit variants (diplotypes)
    
-![figure-run-federated-queries--UDF](https://github.com/user-attachments/assets/e38954d1-7e27-41c9-a461-8737e75462ce)
+![BeginNGS-implementatio-for-non-TileDB-users](https://github.com/user-attachments/assets/45ccb8e4-ad59-4a72-aa63-265d3e749779)
 
 ### Source Code
 
