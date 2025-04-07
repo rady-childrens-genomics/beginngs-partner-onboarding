@@ -30,7 +30,7 @@ The high level approach is:
 5. Compute positive_genotypes using MOI rules
 6. For each gene/subject grouping, compose a concatenated string of observed hit variants (diplotypes)
    
-<img width="6930" alt="beginngs_flow" src="beginngs_flow.png">
+![figure-run-federated-queries--UDF](https://github.com/user-attachments/assets/e38954d1-7e27-41c9-a461-8737e75462ce)
 
 ### Source Code
 
