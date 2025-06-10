@@ -1073,9 +1073,23 @@ def beginngs_query(
 
             gene_pivot['ZYGOSITY'] = gene_pivot_orig.apply(lambda row: 'HOMOZYGOUS' if 'HOM_ALT' in row.values else 'COMPOUND HETEROZYGOUS' if 'CMPD_HET' in row.values else  'HEMIZYGOUS' if 'HEMI' in row.values else 'HETEROZYGOUS' if any(v != '' for v in row.values) else '', axis=1)
 
-            if gene == 'G6PD':
-                import pdb; pdb.set_trace()
-            # This is for debugging
+             # For hemizygous cases, combine all variants into a single bracket
+            def fix_hemizygous_diplotypes(row):
+                if row['ZYGOSITY'] == 'HEMIZYGOUS':
+                    # Extract all variants from the diplotype
+                    variants = []
+                    for bracket in row['DIPLOTYPE'].split(';'):
+                        if bracket.startswith('[') and bracket.endswith(']'):
+                            variants.extend(bracket[1:-1].split(';'))
+                    # Sort variants by position
+                    variants.sort(key=lambda x: int(x.split('-')[1]))
+                    # Return single bracket with all variants
+                    return f"[{';'.join(variants)}]"
+                return row['DIPLOTYPE']
+            
+
+            gene_pivot['DIPLOTYPE'] = gene_pivot.apply(fix_hemizygous_diplotypes, axis=1)
+
             include_samples = False
             if include_samples:
                 # Group by DIPLOTYPE and ZYGOSITY first
